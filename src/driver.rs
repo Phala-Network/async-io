@@ -1,9 +1,8 @@
 use std::cell::Cell;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use futures_lite::pin;
@@ -16,25 +15,18 @@ use crate::reactor::Reactor;
 static BLOCK_ON_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Unparker for the "async-io" thread.
-static UNPARKER: Lazy<parking::Unparker> = Lazy::new(|| {
+static UNPARKER: Lazy<Mutex<Option<parking::Unparker>>> = Lazy::new(|| Mutex::new(None));
+
+/// IO main loop. Added by phala.network to avoid create thread with in SGX.
+pub fn io_main_loop() {
     let (parker, unparker) = parking::pair();
+    *UNPARKER.lock().unwrap() = Some(unparker);
 
-    // Spawn a helper thread driving the reactor.
-    //
-    // Note that this thread is not exactly necessary, it's only here to help push things
-    // forward if there are no `Parker`s around or if `Parker`s are just idling and never
-    // parking.
-    thread::Builder::new()
-        .name("async-io".to_string())
-        .spawn(move || main_loop(parker))
-        .expect("cannot spawn async-io thread");
-
-    unparker
-});
+    main_loop(parker)
+}
 
 /// Initializes the "async-io" thread.
 pub(crate) fn init() {
-    Lazy::force(&UNPARKER);
 }
 
 /// The main loop for the "async-io" thread.
@@ -109,7 +101,7 @@ pub fn block_on<T>(future: impl Future<Output = T>) -> T {
     // Make sure to decrement `BLOCK_ON_COUNT` at the end and wake the "async-io" thread.
     let _guard = CallOnDrop(|| {
         BLOCK_ON_COUNT.fetch_sub(1, Ordering::SeqCst);
-        UNPARKER.unpark();
+        UNPARKER.lock().unwrap().as_ref().expect("io loop is not running").unpark();
     });
 
     // Parker and unparker for notifying the current thread.
@@ -205,7 +197,7 @@ pub fn block_on<T>(future: impl Future<Output = T>) -> T {
 
                     // Unpark the "async-io" thread in case no other thread is ready to start
                     // processing I/O events. This way we prevent a potential latency spike.
-                    UNPARKER.unpark();
+                    UNPARKER.lock().unwrap().as_ref().expect("io loop is not running").unpark();
 
                     // Wait for a notification.
                     p.park();

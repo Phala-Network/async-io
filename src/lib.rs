@@ -84,7 +84,7 @@ use crate::reactor::{Reactor, Source};
 mod driver;
 mod reactor;
 
-pub use driver::block_on;
+pub use driver::{block_on, io_main_loop};
 pub use reactor::{Readable, ReadableOwned, Writable, WritableOwned};
 
 /// Use `Duration::MAX` once `duration_constants` are stabilized.
