@@ -84,7 +84,9 @@ use crate::reactor::{Reactor, Source};
 mod driver;
 mod reactor;
 
-pub use driver::{block_on, io_main_loop};
+pub use driver::block_on;
+#[cfg(feature = "phala-sgx")]
+pub use driver::io_main_loop;
 pub use reactor::{Readable, ReadableOwned, Writable, WritableOwned};
 
 /// Use `Duration::MAX` once `duration_constants` are stabilized.

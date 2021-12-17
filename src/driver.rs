@@ -1,7 +1,9 @@
 use std::cell::Cell;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "phala-sgx")]
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -15,9 +17,27 @@ use crate::reactor::Reactor;
 static BLOCK_ON_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Unparker for the "async-io" thread.
+#[cfg(feature = "phala-sgx")]
 static UNPARKER: Lazy<Mutex<Option<parking::Unparker>>> = Lazy::new(|| Mutex::new(None));
+#[cfg(not(feature = "phala-sgx"))]
+static UNPARKER: Lazy<parking::Unparker> = Lazy::new(|| {
+    let (parker, unparker) = parking::pair();
+
+    // Spawn a helper thread driving the reactor.
+    //
+    // Note that this thread is not exactly necessary, it's only here to help push things
+    // forward if there are no `Parker`s around or if `Parker`s are just idling and never
+    // parking.
+    std::thread::Builder::new()
+        .name("async-io".to_string())
+        .spawn(move || main_loop(parker))
+        .expect("cannot spawn async-io thread");
+
+    unparker
+});
 
 /// IO main loop. Added by phala.network to avoid create thread with in SGX.
+#[cfg(feature = "phala-sgx")]
 pub fn io_main_loop() {
     let (parker, unparker) = parking::pair();
     *UNPARKER.lock().unwrap() = Some(unparker);
@@ -25,8 +45,17 @@ pub fn io_main_loop() {
     main_loop(parker)
 }
 
+fn unpark() {
+    #[cfg(feature = "phala-sgx")]
+    UNPARKER.lock().unwrap().as_ref().expect("io loop is not running").unpark();
+    #[cfg(not(feature = "phala-sgx"))]
+    UNPARKER.unpark();
+}
+
 /// Initializes the "async-io" thread.
 pub(crate) fn init() {
+    #[cfg(not(feature = "phala-sgx"))]
+    Lazy::force(&UNPARKER);
 }
 
 /// The main loop for the "async-io" thread.
@@ -101,7 +130,7 @@ pub fn block_on<T>(future: impl Future<Output = T>) -> T {
     // Make sure to decrement `BLOCK_ON_COUNT` at the end and wake the "async-io" thread.
     let _guard = CallOnDrop(|| {
         BLOCK_ON_COUNT.fetch_sub(1, Ordering::SeqCst);
-        UNPARKER.lock().unwrap().as_ref().expect("io loop is not running").unpark();
+        unpark();
     });
 
     // Parker and unparker for notifying the current thread.
@@ -197,7 +226,7 @@ pub fn block_on<T>(future: impl Future<Output = T>) -> T {
 
                     // Unpark the "async-io" thread in case no other thread is ready to start
                     // processing I/O events. This way we prevent a potential latency spike.
-                    UNPARKER.lock().unwrap().as_ref().expect("io loop is not running").unpark();
+                    unpark();
 
                     // Wait for a notification.
                     p.park();

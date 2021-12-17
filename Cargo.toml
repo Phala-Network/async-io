@@ -45,3 +45,6 @@ timerfd = "1.1.1"
 
 [target.'cfg(windows)'.dev-dependencies]
 uds_windows = "1"
+
+[features]
+phala-sgx = []
